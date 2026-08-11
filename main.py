@@ -1157,7 +1157,7 @@ def startup_screen():
         "║                                                      ║",
         "║              S T U D Y   L O G G E R                 ║",
         "║                                                      ║",
-        "║                  Focus. Track. Grow.                  ║",
+        "║                  Author: August0422                  ║",
         "║                                                      ║",
         "╚══════════════════════════════════════════════════════╝",
     ]
