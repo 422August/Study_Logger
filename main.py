@@ -6,9 +6,10 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-FILE_PATH = "study_records.csv"
-SETTINGS_PATH = "study_settings.json"
+FILE_PATH = os.path.join(BASE_DIR, "study_records.csv")
+SETTINGS_PATH = os.path.join(BASE_DIR, "study_settings.json")
 FIELDNAMES = [
     "date",
     "start_time",
@@ -26,6 +27,7 @@ SUBJECTS = (
     "Chemistry",
     "Biology",
     "Earth Science",
+    "Science (Question)",
     "Social Sciences",
 )
 DEFAULT_SETTINGS = {
@@ -106,6 +108,17 @@ def save_records(records):
 
 def append_record(record):
     ensure_data_file()
+
+    # Make sure the existing file ends with a newline.
+    if os.path.getsize(FILE_PATH) > 0:
+        with open(FILE_PATH, "rb") as file:
+            file.seek(-1, os.SEEK_END)
+            last_byte = file.read(1)
+
+        if last_byte not in (b"\n", b"\r"):
+            with open(FILE_PATH, "ab") as file:
+                file.write(b"\n")
+
     with open(FILE_PATH, "a", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=FIELDNAMES)
         writer.writerow(record)
@@ -174,6 +187,25 @@ def ask_positive_int(prompt, default=None):
         return None
     return number if number > 0 else None
 
+
+
+
+def parse_clock_text(value):
+    value = value.strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(value, fmt).time()
+        except ValueError:
+            pass
+    return None
+
+
+def combine_session_datetimes(record_date, start_time, end_time):
+    start_dt = datetime.combine(record_date.date(), start_time)
+    end_dt = datetime.combine(record_date.date(), end_time)
+    if end_dt < start_dt:
+        end_dt += timedelta(days=1)
+    return start_dt, end_dt
 
 def make_record(subject, start_dt, end_dt, minutes, record_type, notes=""):
     return {
@@ -527,14 +559,12 @@ def manual_log():
     subject = choose_subject()
     if subject is None:
         return
+
     clear_screen()
     print_header("Manual Log")
     print(subject)
-    minutes = ask_positive_float("Minutes: ")
-    if minutes is None:
-        print("Invalid duration.")
-        pause()
-        return
+
+    now = datetime.now()
     date_text = input("Date YYYY-MM-DD [today]: ").strip()
     if date_text:
         try:
@@ -544,30 +574,56 @@ def manual_log():
             pause()
             return
     else:
-        record_date = datetime.now()
+        record_date = now
+
+    default_time = now.strftime("%H:%M")
+    start_text = input(f"Start time HH:MM [{default_time}]: ").strip() or default_time
+    start_time = parse_clock_text(start_text)
+    if start_time is None:
+        print("Invalid start time.")
+        pause()
+        return
+
+    end_text = input(f"End time HH:MM [{default_time}]: ").strip() or default_time
+    end_time = parse_clock_text(end_text)
+    if end_time is None:
+        print("Invalid end time.")
+        pause()
+        return
+
+    start_dt, end_dt = combine_session_datetimes(record_date, start_time, end_time)
+    minutes = (end_dt - start_dt).total_seconds() / 60
+    if minutes <= 0:
+        print("Duration must be greater than 0 minutes.")
+        pause()
+        return
+
     notes = input("Notes (optional): ").strip()
-    record = {
-        "date": record_date.strftime("%Y-%m-%d"),
-        "start_time": "N/A",
-        "end_time": "N/A",
-        "subject": subject,
-        "duration_minutes": round(minutes, 1),
-        "type": "Manual",
-        "notes": notes,
-    }
-    append_record(record)
-    print("Saved.")
+    append_record(make_record(subject, start_dt, end_dt, minutes, "Manual", notes))
+
+    clear_screen()
+    print_header("Saved")
+    print(f"{subject}  {format_minutes(minutes)}")
+    print(f"{start_dt.strftime('%H:%M')} -> {end_dt.strftime('%H:%M')}")
     pause()
 
 
 def display_record(number, row):
     duration = safe_float(row.get("duration_minutes"))
     date_text = row.get("date", "")
+    start_text = row.get("start_time", "")
+    end_text = row.get("end_time", "")
     subject_text = row.get("subject", "")
     type_text = row.get("type", "")
     duration_text = format_minutes(duration)
+
+    if start_text and end_text and start_text != "N/A" and end_text != "N/A":
+        time_text = f"{start_text[:5]}-{end_text[:5]}"
+    else:
+        time_text = "--:-----:--"
+
     print(
-        f"{number:>2}. {date_text}  "
+        f"{number:>2}. {date_text} {time_text:<11} "
         f"{subject_text:<15} {duration_text:>7}  {type_text}"
     )
     notes = row.get("notes", "").strip()
@@ -661,31 +717,77 @@ def edit_record():
     index = select_recent_record(records, "Edit")
     if index is None:
         return
+
     record = records[index]
     clear_screen()
     print_header("Edit")
     print(f"Subject: {record['subject']}")
+    print(f"Date: {record.get('date', '')}")
+    print(f"Start: {record.get('start_time', '')}")
+    print(f"End: {record.get('end_time', '')}")
     print(f"Duration: {record['duration_minutes']}m")
     print(f"Notes: {record['notes']}")
     print("\n1. Subject")
-    print("2. Duration")
-    print("3. Notes")
+    print("2. Date")
+    print("3. Start time")
+    print("4. End time")
+    print("5. Notes")
     print("0. Back")
     choice = input("\nSelect: ").strip()
+
     if choice == "1":
         subject = choose_subject()
         if subject is None:
             return
         record["subject"] = subject
+
     elif choice == "2":
-        minutes = ask_positive_float("Minutes: ")
-        if minutes is None:
+        current = record.get("date", "")
+        date_text = input(f"Date YYYY-MM-DD [{current}]: ").strip() or current
+        try:
+            datetime.strptime(date_text, "%Y-%m-%d")
+        except ValueError:
+            print("Invalid date.")
+            pause()
             return
-        record["duration_minutes"] = round(minutes, 1)
-    elif choice == "3":
+        record["date"] = date_text
+
+    elif choice in ("3", "4"):
+        field = "start_time" if choice == "3" else "end_time"
+        label = "Start time" if choice == "3" else "End time"
+        current = record.get(field, "")
+        default_display = current[:5] if current and current != "N/A" else datetime.now().strftime("%H:%M")
+        value = input(f"{label} HH:MM [{default_display}]: ").strip() or default_display
+        parsed = parse_clock_text(value)
+        if parsed is None:
+            print("Invalid time.")
+            pause()
+            return
+        record[field] = parsed.strftime("%H:%M:%S")
+
+    elif choice == "5":
         record["notes"] = input("Notes: ").strip()
+
     else:
         return
+
+    start_text = record.get("start_time", "")
+    end_text = record.get("end_time", "")
+    if start_text != "N/A" and end_text != "N/A":
+        try:
+            record_date = datetime.strptime(record["date"], "%Y-%m-%d")
+            start_time = datetime.strptime(start_text, "%H:%M:%S").time()
+            end_time = datetime.strptime(end_text, "%H:%M:%S").time()
+            start_dt, end_dt = combine_session_datetimes(record_date, start_time, end_time)
+            minutes = (end_dt - start_dt).total_seconds() / 60
+            if minutes <= 0:
+                print("Duration must be greater than 0 minutes.")
+                pause()
+                return
+            record["duration_minutes"] = round(minutes, 1)
+        except ValueError:
+            pass
+
     save_records(records)
     print("Saved.")
     pause()
@@ -1047,10 +1149,50 @@ def main_menu():
     print("5. Settings")
     print("0. Exit")
 
+def startup_screen():
+    clear_screen()
+
+    logo = [
+        "╔══════════════════════════════════════════════════════╗",
+        "║                                                      ║",
+        "║              S T U D Y   L O G G E R                 ║",
+        "║                                                      ║",
+        "║                  Focus. Track. Grow.                  ║",
+        "║                                                      ║",
+        "╚══════════════════════════════════════════════════════╝",
+    ]
+
+    # Print the logo with a short reveal animation.
+    for line in logo:
+        print(line)
+        time.sleep(0.06)
+
+    print()
+
+    # Animated loading bar.
+    width = 30
+    for i in range(width + 1):
+        percent = int(i / width * 100)
+        bar = "█" * i + "░" * (width - i)
+
+        print(
+            f"\r            Initializing  {bar} {percent:3d}%",
+            end="",
+            flush=True,
+        )
+
+        time.sleep(0.025)
+
+    print("\n")
+    print("                         Ready")
+    time.sleep(0.45)
+
+    clear_screen()
 
 def main():
     ensure_data_file()
     load_settings()
+    startup_screen()
     while True:
         main_menu()
         choice = input("\nSelect: ").strip()
